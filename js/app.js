@@ -8,7 +8,7 @@
   // progress[itemId] = [练过几次, 最近一次是否一次就对(1/0)]
   const load = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d; } catch (e) { return d; } };
   const progress = load("ear.progress", {});
-  const settings = Object.assign({ strict: false, arp: false, bpm: 120, ref: true, autoNext: true, volume: 0.8, midiSound: false }, load("ear.settings", {}));
+  const settings = Object.assign({ loop: true, gap: 3, strict: false, arp: false, bpm: 120, ref: true, autoNext: true, volume: 0.8, midiSound: false }, load("ear.settings", {}));
   const save = () => localStorage.setItem("ear.progress", JSON.stringify(progress));
   const saveSettings = () => localStorage.setItem("ear.settings", JSON.stringify(settings));
 
@@ -149,7 +149,10 @@
     next();
   }
 
+  function stopTimers() { if (st) { clearTimeout(st.timer); clearTimeout(st.loop); } }
+
   function next() {
+    stopTimers();
     const prev = cur && cur.id;
     for (let i = 0; i < 6; i++) { cur = mode.pick(); if (cur.id !== prev) break; } // 别连着出同一题
     st = { tries: 0, failed: false, revealed: false, solved: false, held: new Set(), group: new Set(), touch: new Set(), pos: 0, ci: 0, played: [] };
@@ -157,12 +160,31 @@
     listen();
   }
 
-  async function listen() {
-    setStatus("听…", "");
+  // again=true 是自动重放：不再给参考和弦，状态文字也不覆盖（保留"不对"的提示）
+  async function listen(again = false) {
+    const s0 = st;
+    if (!again) setStatus("听…", "");
     await A.whenReady();
-    const dur = A.play(cur, settings);
-    clearTimeout(st.timer);
-    st.timer = setTimeout(() => { if (!st.solved && !st.revealed) setStatus(inputHint(), ""); }, dur * 1000);
+    if (st !== s0) return;
+    const dur = A.play(cur, again ? { ...settings, ref: false, noRef: true } : settings);
+    stopTimers();
+    st.timer = setTimeout(() => {
+      if (st.solved || st.revealed) return;
+      if (!again) setStatus(inputHint(), "");
+      loopLater();
+    }, dur * 1000);
+  }
+
+  // 没弹对就隔几秒再放一遍；正在按键/弹乐句弹到一半时往后推
+  function loopLater(delay = settings.gap * 1000) {
+    clearTimeout(st.loop);
+    if (!settings.loop || st.solved || st.revealed) return;
+    const s0 = st;
+    st.loop = setTimeout(() => {
+      if (st !== s0 || st.solved || st.revealed) return;
+      if (st.held.size || st.touch.size || st.pos || st.ci) return loopLater();
+      listen(true);
+    }, delay);
   }
 
   const inputHint = () => midiNames && midiNames.length ? "在琴上弹出来" : "点下面的琴键弹出来";
@@ -224,6 +246,7 @@
     e.preventDefault();
     const m = +k.dataset.m;
     A.note(m);
+    if (st.timer && !st.solved) loopLater();
     // 单音/乐句：点一下就算弹一个音；和弦类：点选几个键再按"确定"
     if (cur.kind === "single" || cur.kind === "phrase") { onNotes([m]); flash(k); }
     else { st.touch.has(m) ? st.touch.delete(m) : st.touch.add(m); renderPractice(); }
@@ -237,6 +260,7 @@
     if (!cur || $("#practice").classList.contains("hide")) return;
     if (settings.midiSound) A.note(m, vel);
     st.held.add(m);
+    if (!st.solved) loopLater();
     if (cur.kind === "single" || cur.kind === "phrase") onNotes([m]);
     else st.group.add(m);
     renderKeys();
@@ -294,13 +318,15 @@
       if (ok) {
         st.ci++;
         if (st.ci === cur.chords.length) win(); else { setStatus(`第 ${st.ci} 个对了，接着弹`, "good"); renderPractice(); }
-      } else miss(`第 ${st.ci + 1} 个和弦不对（根音在最低，3、7 音要有）`);
+      } else { miss(`第 ${st.ci + 1} 个和弦不对，从头再来（根音在最低，3、7 音要有）`); renderPractice(); }
     }
   }
 
   function miss(text) {
     st.tries++; st.failed = true;
     setStatus("✗ " + text, "bad");
+    if (cur.kind === "prog") st.ci = 0;
+    loopLater(1500);
   }
 
   function record(ok) {
@@ -313,6 +339,7 @@
   }
 
   function win() {
+    stopTimers();
     st.solved = true;
     if (!st.revealed) record(!st.failed);
     setStatus(st.failed ? "✓ 对了" : "✓ 一次就对", "good");
@@ -323,12 +350,13 @@
   $("#btnReveal").onclick = () => {
     if (!st.revealed && !st.solved) record(false);
     st.revealed = true; st.failed = true;
+    stopTimers();
     setStatus("答案在下面，可以照着弹一遍", "");
     renderPractice();
   };
-  $("#btnAgain").onclick = () => listen();
-  $("#btnNext").onclick = () => { clearTimeout(st.timer); next(); };
-  $("#btnBack").onclick = () => { clearTimeout(st && st.timer); A.stop(); cur = null; show("home"); };
+  $("#btnAgain").onclick = () => listen(st.tries > 0);
+  $("#btnNext").onclick = () => next();
+  $("#btnBack").onclick = () => { stopTimers(); A.stop(); cur = null; show("home"); };
 
   // ---------- 回顾：自动播放听过的和弦 ----------
   let rv = null;
@@ -367,6 +395,8 @@
   function renderSettings() {
     const tg = (k, label, desc) => `<label class="set"><div><div class="t">${label}</div><div class="d">${desc}</div></div><input type="checkbox" data-k="${k}" ${settings[k] ? "checked" : ""}></label>`;
     $("#setbody").innerHTML =
+      tg("loop", "没弹对就反复播放", "隔几秒自动再放一遍，直到弹对或揭晓；你按键时会等你") +
+      `<label class="set"><div><div class="t">重放间隔</div><div class="d"><span id="gapv">${settings.gap}</span> 秒没动静就再放</div></div><input type="range" min="1" max="10" step="1" value="${settings.gap}" data-k="gap"></label>` +
       tg("strict", "严格判定", "八度也要和听到的一样；关掉时只看音名，转位要对") +
       tg("arp", "和弦先分解再柱式", "先一个一个音弹，再一起响") +
       tg("ref", "乐句前先给调", "放乐句前先弹一下主音+五度（单音题总会先给主和弦）") +
@@ -380,6 +410,7 @@
     if (!k) return;
     settings[k] = e.target.type === "checkbox" ? e.target.checked : +e.target.value;
     if (k === "bpm") $("#bpmv").textContent = settings.bpm;
+    if (k === "gap") $("#gapv").textContent = settings.gap;
     if (k === "volume") A.setVolume(settings.volume);
     saveSettings();
   });

@@ -29,7 +29,7 @@
     stop();
     let t = Tone.now() + 0.05;
     const hit = (notes, dur, at, vel = 0.7) => piano.triggerAttackRelease(notes.map(f), dur, at, vel);
-    if (it.ref && (it.kind === "single" || opt.ref)) {
+    if (it.ref && !opt.noRef && (it.kind === "single" || opt.ref)) {
       hit(it.ref, 1.0, t, 0.5);
       t += 1.4;
     }
